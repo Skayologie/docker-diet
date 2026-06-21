@@ -3,29 +3,38 @@ name: Release
 on:
   push:
     tags:
-      - "v*"          # triggers on v1.0.0, v1.2.3, etc.
+      - "v*"
 
 permissions:
-  contents: write    # needed to create GitHub releases
+  contents: write
+
+env:
+  CARGO_NET_RETRY: 10
+  CARGO_HTTP_TIMEOUT: 300
+  RUSTUP_MAX_RETRIES: 10
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_name: docker-diet-windows-x86_64.exe
+            binary: target/x86_64-pc-windows-msvc/release/docker-diet.exe
 
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             asset_name: docker-diet-linux-x86_64
+            binary: target/x86_64-unknown-linux-gnu/release/docker-diet
 
           - os: macos-latest
             target: aarch64-apple-darwin
             asset_name: docker-diet-macos-aarch64
+            binary: target/aarch64-apple-darwin/release/docker-diet
 
     steps:
       - name: Checkout
@@ -40,24 +49,26 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Build
-        run: cargo build --release --package diet-cli --target ${{ matrix.target }}
+        run: >
+          cargo build
+          --release
+          --package diet-cli
+          --target ${{ matrix.target }}
+        # Note: no --features ebpf — ships with static analysis by default.
+        # Users who want eBPF runtime profiling can build from source on Linux:
+        #   cargo build --release --package diet-cli --features ebpf
 
-      - name: Rename binary (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          cp target/${{ matrix.target }}/release/docker-diet ${{ matrix.asset_name }}
-
-      - name: Rename binary (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          Copy-Item "target\${{ matrix.target }}\release\docker-diet.exe" "${{ matrix.asset_name }}"
-        shell: pwsh
+      - name: Rename & upload artifact
+        shell: bash
+        run: cp "${{ matrix.binary }}" "${{ matrix.asset_name }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -86,18 +97,27 @@ jobs:
           body: |
             ## docker-diet ${{ github.ref_name }}
 
-            ### Install (Windows)
+            ### One-command install
+
+            **Windows:**
             ```powershell
             irm https://jawadboulmal.com/envault/install.ps1 | iex
             ```
 
-            ### Install (Linux / macOS)
+            **Linux / macOS:**
             ```bash
             bash <(curl -sSf https://jawadboulmal.com/envault/install.sh)
             ```
 
             ### Manual download
-            Pick the binary for your platform below.
+            Pick the binary for your platform from the assets below.
+
+            ### eBPF runtime profiling (advanced, Linux only)
+            The distributed binary uses **static analysis** by default (works everywhere, no root needed).
+            To enable eBPF runtime profiling, build from source on Linux:
+            ```bash
+            cargo build --release --package diet-cli --features ebpf
+            ```
           files: artifacts/*
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}

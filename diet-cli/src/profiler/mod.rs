@@ -1,6 +1,6 @@
 pub mod static_analysis;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
 pub mod ebpf;
 
 use std::collections::HashSet;
@@ -48,7 +48,7 @@ pub async fn profile(
 ) -> Result<ProfileResult> {
     let want_ebpf = config.profile.use_ebpf;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "ebpf"))]
     if want_ebpf {
         match ebpf::run_profile(image.name.as_deref(), duration).await {
             Ok(result) => return Ok(result),
@@ -61,9 +61,10 @@ pub async fn profile(
         }
     }
 
-    if want_ebpf && cfg!(not(target_os = "linux")) {
+    if want_ebpf && !cfg!(all(target_os = "linux", feature = "ebpf")) {
         tracing::info!(
-            "eBPF requires Linux; using static analysis on this platform."
+            "eBPF not enabled in this build; using static analysis. \
+             Rebuild with --features ebpf on Linux for runtime profiling."
         );
     }
 

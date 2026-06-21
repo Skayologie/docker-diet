@@ -35,7 +35,12 @@ tempfile      = "3.10"
 regex         = "1.10"
 diet-ebpf-common = { path = "../diet-ebpf-common", features = ["user"] }
 
+# eBPF runtime profiling — Linux only, opt-in via --features ebpf
+# Default build (and all CI releases) uses static analysis instead.
+[features]
+ebpf = ["aya", "aya-log", "nix"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
-aya     = { version = "0.12", features = ["async_tokio"] }
-aya-log = "0.2"
-nix     = { version = "0.27", features = ["process"] }
+aya     = { version = "0.12", features = ["async_tokio"], optional = true }
+aya-log = { version = "0.2",                              optional = true }
+nix     = { version = "0.27", features = ["process"],     optional = true }
