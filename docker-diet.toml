@@ -1,0 +1,40 @@
+[preserve]
+# Always retain these absolute paths regardless of trace results
+paths = [
+    "/etc/ssl/certs",
+    "/etc/ca-certificates",
+    "/usr/share/zoneinfo",
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/nsswitch.conf",
+    "/etc/resolv.conf",
+]
+
+# Retain every file matching these glob patterns
+patterns = [
+    "**/*.so*",        # All shared libraries
+    "**/locale/**",    # Locale data (conditional exception risk)
+    "**/.env*",        # Environment configuration
+    "**/ca-bundle*",   # CA bundles (TLS)
+]
+
+[profile]
+# Duration to run eBPF profiling (in seconds)
+duration_secs = 60
+
+# Files smaller than this (bytes) are never dropped
+min_drop_size = 0
+
+# Use eBPF runtime profiling when available (requires Linux + CAP_SYS_ADMIN).
+# Automatically falls back to static analysis on unsupported platforms.
+use_ebpf = true
+
+[output]
+# Base image for the generated Dockerfile
+base_image = "gcr.io/distroless/static-debian11"
+
+# Generate a multi-stage Dockerfile
+multi_stage = true
+
+# Output artifacts: "dockerfile" | "tarball" | "both"
+format = "both"

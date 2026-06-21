@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"          # triggers on v1.0.0, v1.2.3, etc.
+
+permissions:
+  contents: write    # needed to create GitHub releases
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_name: docker-diet-windows-x86_64.exe
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_name: docker-diet-linux-x86_64
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset_name: docker-diet-macos-aarch64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --package diet-cli --target ${{ matrix.target }}
+
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/docker-diet ${{ matrix.asset_name }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          Copy-Item "target\${{ matrix.target }}\release\docker-diet.exe" "${{ matrix.asset_name }}"
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "docker-diet ${{ github.ref_name }}"
+          body: |
+            ## docker-diet ${{ github.ref_name }}
+
+            ### Install (Windows)
+            ```powershell
+            irm https://jawadboulmal.com/envault/install.ps1 | iex
+            ```
+
+            ### Install (Linux / macOS)
+            ```bash
+            bash <(curl -sSf https://jawadboulmal.com/envault/install.sh)
+            ```
+
+            ### Manual download
+            Pick the binary for your platform below.
+          files: artifacts/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}

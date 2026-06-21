@@ -1,0 +1,13 @@
+[package]
+name = "diet-ebpf-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared event types between the diet-ebpf kernel probe and diet-cli userspace"
+
+[features]
+default = []
+# Enable userspace-only derives (serde, debug formatting)
+user = ["serde"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"], optional = true }
