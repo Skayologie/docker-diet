@@ -1,67 +1,137 @@
 #!/usr/bin/env bash
-# Docker-Diet Installer for Linux / macOS / WSL2
-# Run with: curl -sSf https://raw.githubusercontent.com/.../install.sh | bash
-# Or locally: bash install.sh
+# docker-diet installer for Linux / macOS / WSL2
+# Usage: bash <(curl -sSf https://jawadboulmal.com/envault/install.sh)
 
 set -e
 
-BOLD="\033[1m"; CYAN="\033[36m"; GREEN="\033[32m"; YELLOW="\033[33m"; RESET="\033[0m"
+# ── Config ────────────────────────────────────────────────────────────────────
+REPO="Skayologie/docker-diet"
+BIN="docker-diet"
+INSTALL_DIR="$HOME/.local/bin"
+# ─────────────────────────────────────────────────────────────────────────────
 
-step() { echo -e "\n${CYAN}>> $1${RESET}"; }
-ok()   { echo -e "   ${GREEN}OK${RESET}  $1"; }
-warn() { echo -e "   ${YELLOW}!!${RESET}  $1"; }
+BOLD="\033[1m"; CYAN="\033[36m"; GREEN="\033[32m"; YELLOW="\033[33m"; RED="\033[31m"; RESET="\033[0m"
+
+step() { echo -e "\n${CYAN}  >> $1${RESET}"; }
+ok()   { echo -e "     ${GREEN}OK${RESET}  $1"; }
+warn() { echo -e "     ${YELLOW}!!${RESET}  $1"; }
+err()  { echo -e "\n${RED}  ERR: $1${RESET}\n"; exit 1; }
 
 echo ""
-echo -e "${BOLD}${CYAN}  docker-diet installer${RESET}"
-echo -e "${BOLD}  ─────────────────────────────────────${RESET}"
+echo -e "${BOLD}${CYAN}  docker-diet  —  Installer${RESET}"
+echo -e "${CYAN}  ──────────────────────────────────────${RESET}"
 echo ""
 
-# ── 1. Check / install Rust ───────────────────────────────────────────────────
+# ── 1. Detect platform ────────────────────────────────────────────────────────
 
-step "Checking for Rust / cargo..."
+step "Detecting platform..."
 
-if ! command -v cargo &>/dev/null; then
-    warn "Rust not found. Installing via rustup..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-    source "$HOME/.cargo/env"
-    ok "Rust installed."
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+case "$OS" in
+  Linux)
+    case "$ARCH" in
+      x86_64)  ASSET="${BIN}-linux-x86_64" ;;
+      aarch64) ASSET="${BIN}-linux-aarch64" ;;
+      *)        err "Unsupported architecture: $ARCH" ;;
+    esac
+    ;;
+  Darwin)
+    case "$ARCH" in
+      arm64|aarch64) ASSET="${BIN}-macos-aarch64" ;;
+      x86_64)        ASSET="${BIN}-macos-x86_64" ;;
+      *)              err "Unsupported architecture: $ARCH" ;;
+    esac
+    ;;
+  *)
+    err "Unsupported OS: $OS. Use install.ps1 on Windows."
+    ;;
+esac
+
+ok "Platform: $OS $ARCH  →  $ASSET"
+
+# ── 2. Fetch latest release from GitHub ──────────────────────────────────────
+
+step "Fetching latest release..."
+
+API_URL="https://api.github.com/repos/$REPO/releases/latest"
+
+if command -v curl &>/dev/null; then
+  RELEASE_JSON=$(curl -sSfL -H "User-Agent: docker-diet-installer" "$API_URL")
+elif command -v wget &>/dev/null; then
+  RELEASE_JSON=$(wget -qO- --header="User-Agent: docker-diet-installer" "$API_URL")
 else
-    ok "Rust already installed: $(cargo --version)"
+  err "curl or wget is required but neither was found."
 fi
 
-# Ensure cargo env is loaded
-[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+VERSION=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep "$ASSET" | head -1 | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
 
-# ── 2. Build and install docker-diet ─────────────────────────────────────────
+[ -z "$VERSION" ]      && err "Could not determine latest release version."
+[ -z "$DOWNLOAD_URL" ] && err "No binary found for '$ASSET' in release $VERSION."
 
-step "Building and installing docker-diet (first build: 2-5 minutes)..."
+ok "Latest version : $VERSION"
+ok "Download target: $ASSET"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# ── 3. Download ───────────────────────────────────────────────────────────────
 
-cargo install --path diet-cli --quiet
-ok "docker-diet installed."
+step "Downloading $BIN $VERSION..."
 
-# ── 3. Verify ─────────────────────────────────────────────────────────────────
+mkdir -p "$INSTALL_DIR"
+TMP="$(mktemp)"
 
-step "Verifying installation..."
-
-if command -v docker-diet &>/dev/null; then
-    ok "Binary : $(which docker-diet)"
-    ok "Version: $(docker-diet --version)"
+if command -v curl &>/dev/null; then
+  curl -sSfL "$DOWNLOAD_URL" -o "$TMP"
 else
-    warn "Binary not found in PATH. Add ~/.cargo/bin to your PATH:"
-    echo '    echo '"'"'export PATH="$HOME/.cargo/bin:$PATH"'"'"' >> ~/.bashrc && source ~/.bashrc'
+  wget -qO "$TMP" "$DOWNLOAD_URL"
 fi
 
-# ── 4. Done ───────────────────────────────────────────────────────────────────
+chmod +x "$TMP"
+mv "$TMP" "$INSTALL_DIR/$BIN"
+
+ok "Installed to: $INSTALL_DIR/$BIN"
+
+# ── 4. Add to PATH ────────────────────────────────────────────────────────────
+
+step "Checking PATH..."
+
+if echo "$PATH" | grep -q "$INSTALL_DIR"; then
+  ok "Already in PATH."
+else
+  SHELL_RC=""
+  if [ -n "$ZSH_VERSION" ] || [ "$(basename "$SHELL")" = "zsh" ]; then
+    SHELL_RC="$HOME/.zshrc"
+  else
+    SHELL_RC="$HOME/.bashrc"
+  fi
+
+  echo "" >> "$SHELL_RC"
+  echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
+  export PATH="$INSTALL_DIR:$PATH"
+
+  ok "Added $INSTALL_DIR to PATH in $SHELL_RC"
+fi
+
+# ── 5. Verify ─────────────────────────────────────────────────────────────────
+
+step "Verifying..."
+
+if "$INSTALL_DIR/$BIN" --version &>/dev/null; then
+  ok "$(\"$INSTALL_DIR/$BIN\" --version) is ready."
+else
+  warn "Installed but could not verify. Open a new terminal and run: docker-diet --help"
+fi
+
+# ── Done ──────────────────────────────────────────────────────────────────────
 
 echo ""
-echo -e "${GREEN}${BOLD}  Installation complete!${RESET}"
+echo -e "${GREEN}${BOLD}  ✓ Installation complete!${RESET}"
 echo ""
-echo -e "  Usage examples:"
+echo -e "  Quick start:"
+echo "    docker-diet --help"
 echo "    docker-diet dry-run  --image nginx:latest"
 echo "    docker-diet analyze  --image myapp:latest"
-echo "    docker-diet analyze  --tarball ./app.tar --output ./slim.tar"
-echo "    docker-diet --help"
+echo ""
+echo -e "${YELLOW}  NOTE: Open a new terminal if the command is not found yet.${RESET}"
 echo ""
