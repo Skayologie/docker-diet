@@ -150,7 +150,7 @@ fn group_by_dir(files: &[crate::oci::LayerFile]) -> Vec<(String, Vec<PathBuf>)> 
 // ─── Tarball generation ───────────────────────────────────────────────────────
 
 fn build_tarball(image: &OciImage, result: &FilterResult, output_path: &Path) -> Result<()> {
-    use tar::{Builder, Header};
+    use tar::Builder;
 
     let out_file = std::fs::File::create(output_path)
         .with_context(|| format!("creating output tarball '{}'", output_path.display()))?;

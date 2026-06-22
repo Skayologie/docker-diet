@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use goblin::Object;
+use goblin::elf::Elf;
 
 use super::{ProfileMode, ProfileResult};
 use crate::oci::{LayerFile, OciImage};
@@ -59,7 +59,7 @@ pub async fn analyze(image: &OciImage, flat_files: &[LayerFile]) -> Result<Profi
     let mut queue: VecDeque<PathBuf> = roots.iter().cloned().collect();
 
     while let Some(abs_path) = queue.pop_front() {
-        let key = normalise_key(&abs_path);
+        let _key = normalise_key(&abs_path);
         if accessed.contains(&abs_path) {
             continue;
         }
@@ -110,12 +110,11 @@ fn elf_dependencies(
     file_index: &HashMap<String, u64>,
 ) -> Result<Vec<PathBuf>> {
     let data = std::fs::read(binary)?;
-    let obj = Object::parse(&data).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let libraries = match obj {
-        Object::Elf(elf) => elf.libraries.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        _ => return Ok(vec![]),
+    let elf = match Elf::parse(&data) {
+        Ok(e) => e,
+        Err(_) => return Ok(vec![]),  // not an ELF binary — skip silently
     };
+    let libraries = elf.libraries.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
     let mut deps = Vec::new();
     for lib in libraries {

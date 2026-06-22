@@ -6,8 +6,5 @@ description = "Shared event types between the diet-ebpf kernel probe and diet-cl
 
 [features]
 default = []
-# Enable userspace-only derives (serde, debug formatting)
-user = ["serde"]
-
-[dependencies]
-serde = { version = "1.0", features = ["derive"], optional = true }
+# std-only helpers (filename_str, comm_str) — enabled by diet-cli
+user = []

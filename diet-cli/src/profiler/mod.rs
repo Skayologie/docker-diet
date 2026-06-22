@@ -43,7 +43,7 @@ impl std::fmt::Display for ProfileMode {
 pub async fn profile(
     image: &OciImage,
     flat_files: &[LayerFile],
-    duration: Duration,
+    _duration: Duration,
     config: &Config,
 ) -> Result<ProfileResult> {
     let want_ebpf = config.profile.use_ebpf;
