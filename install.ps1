@@ -4,7 +4,7 @@
 $ErrorActionPreference = 'Stop'
 
 # ── Config (update REPO when you push to GitHub) ──────────────────────────────
-$REPO    = "jawadboulmal/docker-diet"          # <-- your GitHub user/repo
+$REPO    = "Skayologie/docker-diet"          
 $BIN     = "docker-diet"
 $INSTALL = "$env:LOCALAPPDATA\Programs\docker-diet"
 # ─────────────────────────────────────────────────────────────────────────────
