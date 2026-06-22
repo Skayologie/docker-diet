@@ -82,10 +82,18 @@ pub async fn analyze(image: &OciImage, flat_files: &[LayerFile]) -> Result<Profi
         }
     }
 
-    // Also preserve all regular config/data files we couldn't trace via ELF
+    // Preserve config/script files and everything inside the working directory
+    let workdir = image.config.working_dir.trim_end_matches('/').to_string();
     for file in flat_files {
         if is_config_file(&file.path) {
             accessed.insert(file.path.clone());
+        }
+        // Keep all files inside the image's working directory (application code)
+        if !workdir.is_empty() {
+            let p = file.path.to_string_lossy().replace('\\', "/");
+            if p.starts_with(&workdir) {
+                accessed.insert(file.path.clone());
+            }
         }
     }
 
@@ -186,6 +194,11 @@ fn is_essential(path: &Path) -> bool {
         || s.starts_with("/usr/share/ca-certificates")
         || s.starts_with("/var/run")
         || s == "/tmp"
+        // Common shells — required by any script with #!/bin/sh or #!/bin/bash
+        || s.ends_with("/dash")
+        || s.ends_with("/bash")
+        || s.ends_with("/sh")
+        || s.ends_with("/env")
 }
 
 fn is_shared_lib(path: &Path) -> bool {
@@ -201,7 +214,12 @@ fn is_binary_path(path: &Path) -> bool {
 fn is_config_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()).unwrap_or(""),
-        "conf" | "cfg" | "ini" | "pem" | "crt" | "key" | "pub" | "json" | "yaml" | "yml" | "toml"
+        // Config and data files
+        "conf" | "cfg" | "ini" | "pem" | "crt" | "key" | "pub"
+        | "json" | "yaml" | "yml" | "toml" | "xml" | "env"
+        // Application code — not traceable via ELF analysis
+        | "js" | "mjs" | "cjs" | "ts" | "py" | "rb" | "php"
+        | "sh" | "bash" | "zsh" | "fish"
     )
 }
 
