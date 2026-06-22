@@ -81,6 +81,25 @@ struct DockerContainerCfg {
     exposed_ports: Option<HashMap<String, serde_json::Value>>,
 }
 
+// OCI Image Layout structs (index.json / manifest blob)
+#[derive(Deserialize)]
+struct OciIndex {
+    manifests: Vec<OciDescriptor>,
+}
+
+#[derive(Deserialize)]
+struct OciDescriptor {
+    digest: String,
+    #[serde(default)]
+    annotations: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct OciManifestBlob {
+    config: OciDescriptor,
+    layers: Vec<OciDescriptor>,
+}
+
 // ─── Loaders ──────────────────────────────────────────────────────────────────
 
 /// Load an image from a pre-exported tarball on disk.
@@ -118,17 +137,13 @@ pub fn load_from_docker_daemon(image_name: &str) -> Result<OciImage> {
 // ─── Internal parsing ─────────────────────────────────────────────────────────
 
 fn parse_docker_save(data: Vec<u8>) -> Result<OciImage> {
-    // We iterate the archive twice: once to build an in-memory map of all
-    // entries, then to parse the manifest / config / layers from that map.
     let mut entries: HashMap<String, Vec<u8>> = HashMap::new();
-
     {
         let cursor = Cursor::new(&data);
         let mut archive = Archive::new(cursor);
         for entry in archive.entries()? {
             let mut entry = entry?;
             let raw = entry.path()?.to_string_lossy().into_owned();
-            // Strip leading "./" so lookups work for both classic and OCI layouts
             let path_str = raw.trim_start_matches("./").replace('\\', "/");
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
@@ -136,21 +151,27 @@ fn parse_docker_save(data: Vec<u8>) -> Result<OciImage> {
         }
     }
 
-    // Parse manifest.json
-    let manifest_bytes = entries
-        .get("manifest.json")
-        .ok_or_else(|| anyhow!("manifest.json not found — is this a valid `docker save` archive?"))?;
+    if entries.contains_key("manifest.json") {
+        parse_docker_manifest(entries, data)
+    } else if entries.contains_key("index.json") {
+        parse_oci_layout(entries, data)
+    } else {
+        Err(anyhow!(
+            "Neither manifest.json nor index.json found — is this a valid Docker image archive?"
+        ))
+    }
+}
 
+fn parse_docker_manifest(entries: HashMap<String, Vec<u8>>, data: Vec<u8>) -> Result<OciImage> {
+    let manifest_bytes = entries.get("manifest.json").unwrap();
     let mut manifest: Vec<DockerManifestEntry> =
         serde_json::from_slice(manifest_bytes).context("parsing manifest.json")?;
 
-    let entry = if manifest.is_empty() {
+    if manifest.is_empty() {
         return Err(anyhow!("manifest.json contains no image entries"));
-    } else {
-        manifest.remove(0)
-    };
+    }
+    let entry = manifest.remove(0);
 
-    // Parse image config JSON
     let cfg_bytes = entries
         .get(&entry.config)
         .ok_or_else(|| anyhow!("image config '{}' not found in archive", entry.config))?;
@@ -164,43 +185,81 @@ fn parse_docker_save(data: Vec<u8>) -> Result<OciImage> {
         entrypoint: cc.entrypoint.unwrap_or_default(),
         working_dir: cc.working_dir.unwrap_or_default(),
         labels: cc.labels.unwrap_or_default(),
-        exposed_ports: cc
-            .exposed_ports
-            .unwrap_or_default()
-            .into_keys()
-            .collect(),
+        exposed_ports: cc.exposed_ports.unwrap_or_default().into_keys().collect(),
     };
 
-    // Parse each layer tarball
     let mut layers = Vec::new();
     for layer_path in &entry.layers {
         let layer_data = entries
             .get(layer_path)
             .ok_or_else(|| anyhow!("layer '{}' not found in archive", layer_path))?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(layer_data);
-        let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
-
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(layer_data)));
         let files = parse_layer_tar(layer_data)
             .with_context(|| format!("parsing layer '{}'", layer_path))?;
         let uncompressed_size = files.iter().map(|f| f.size).sum();
-
-        layers.push(OciLayer {
-            digest,
-            files,
-            uncompressed_size,
-        });
+        layers.push(OciLayer { digest, files, uncompressed_size });
     }
 
     let name = entry.repo_tags.and_then(|t| t.into_iter().next());
+    Ok(OciImage { name, config: image_config, layers, raw_tarball: data })
+}
 
-    Ok(OciImage {
-        name,
-        config: image_config,
-        layers,
-        raw_tarball: data,
-    })
+fn parse_oci_layout(entries: HashMap<String, Vec<u8>>, data: Vec<u8>) -> Result<OciImage> {
+    let index_bytes = entries.get("index.json").unwrap();
+    let index: OciIndex = serde_json::from_slice(index_bytes).context("parsing index.json")?;
+
+    let manifest_desc = index
+        .manifests
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("index.json has no manifests"))?;
+
+    // digest is "sha256:<hex>" — blob is at "blobs/sha256/<hex>"
+    let blob_path = format!("blobs/sha256/{}", &manifest_desc.digest[7..]);
+    let manifest_bytes = entries
+        .get(&blob_path)
+        .ok_or_else(|| anyhow!("manifest blob '{}' not found", blob_path))?;
+    let manifest: OciManifestBlob =
+        serde_json::from_slice(manifest_bytes).context("parsing OCI manifest blob")?;
+
+    // Parse image config from its blob
+    let cfg_blob_path = format!("blobs/sha256/{}", &manifest.config.digest[7..]);
+    let cfg_bytes = entries
+        .get(&cfg_blob_path)
+        .ok_or_else(|| anyhow!("config blob '{}' not found", cfg_blob_path))?;
+    let docker_cfg: DockerImageCfg =
+        serde_json::from_slice(cfg_bytes).context("parsing OCI config blob")?;
+    let cc = docker_cfg.config.unwrap_or_default();
+
+    let image_config = ImageConfig {
+        env: cc.env.unwrap_or_default(),
+        cmd: cc.cmd.unwrap_or_default(),
+        entrypoint: cc.entrypoint.unwrap_or_default(),
+        working_dir: cc.working_dir.unwrap_or_default(),
+        labels: cc.labels.unwrap_or_default(),
+        exposed_ports: cc.exposed_ports.unwrap_or_default().into_keys().collect(),
+    };
+
+    // Parse layers from their blobs
+    let mut layers = Vec::new();
+    for layer_desc in &manifest.layers {
+        let layer_blob_path = format!("blobs/sha256/{}", &layer_desc.digest[7..]);
+        let layer_data = entries
+            .get(&layer_blob_path)
+            .ok_or_else(|| anyhow!("layer blob '{}' not found", layer_blob_path))?;
+        let digest = layer_desc.digest.clone();
+        let files = parse_layer_tar(layer_data)
+            .with_context(|| format!("parsing layer blob '{}'", layer_blob_path))?;
+        let uncompressed_size = files.iter().map(|f| f.size).sum();
+        layers.push(OciLayer { digest, files, uncompressed_size });
+    }
+
+    // Try to get image name from annotations
+    let name = manifest_desc.annotations.get("io.containerd.image.name")
+        .or_else(|| manifest_desc.annotations.get("org.opencontainers.image.ref.name"))
+        .cloned();
+
+    Ok(OciImage { name, config: image_config, layers, raw_tarball: data })
 }
 
 fn parse_layer_tar(data: &[u8]) -> Result<Vec<LayerFile>> {
