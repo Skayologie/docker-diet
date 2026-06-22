@@ -71,8 +71,10 @@ try {
     Write-Err "Download failed: $($_.Exception.Message)"
 }
 
-# Replace existing binary
+# Replace existing binary and remove the "Mark of the Web" so
+# SmartScreen does not block the executable after installation.
 Copy-Item -Path $tmp -Destination $dest -Force
+Unblock-File -Path $dest
 Remove-Item $tmp -ErrorAction SilentlyContinue
 
 Write-Ok "Installed to: $dest"
