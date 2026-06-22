@@ -150,66 +150,153 @@ fn group_by_dir(files: &[crate::oci::LayerFile]) -> Vec<(String, Vec<PathBuf>)> 
 // ─── Tarball generation ───────────────────────────────────────────────────────
 
 fn build_tarball(image: &OciImage, result: &FilterResult, output_path: &Path) -> Result<()> {
-    use tar::Builder;
+    use sha2::{Digest, Sha256};
 
+    // Step 1 — build the inner filesystem layer tar in memory
+    let layer_bytes = build_layer_tar(image, result)?;
+
+    // Step 2 — compute layer diff_id (sha256 of uncompressed layer tar)
+    let layer_hash = format!("sha256:{}", hex::encode(Sha256::digest(&layer_bytes)));
+    let layer_dir = &layer_hash[7..71]; // 64 hex chars after "sha256:"
+
+    // Step 3 — build image config JSON (same shape as `docker save` produces)
+    let exposed: std::collections::HashMap<String, serde_json::Value> = image
+        .config
+        .exposed_ports
+        .iter()
+        .map(|p| (p.clone(), serde_json::json!({})))
+        .collect();
+
+    let config_json = serde_json::json!({
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {
+            "Env":          image.config.env,
+            "Cmd":          image.config.cmd,
+            "Entrypoint":   image.config.entrypoint,
+            "WorkingDir":   image.config.working_dir,
+            "Labels":       image.config.labels,
+            "ExposedPorts": exposed,
+        },
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [layer_hash]
+        },
+        "history": []
+    });
+    let config_bytes = serde_json::to_vec_pretty(&config_json)?;
+    let config_hash = hex::encode(Sha256::digest(&config_bytes));
+    let config_filename = format!("{config_hash}.json");
+
+    // Step 4 — build manifest.json (classic docker save format)
+    let repo_tag = image.name.as_deref().map(|n| {
+        let base = n.rsplit_once(':').map(|(b, _)| b).unwrap_or(n);
+        format!("{base}:slim")
+    });
+    let manifest = serde_json::json!([{
+        "Config":   config_filename,
+        "RepoTags": repo_tag.map(|t| vec![t]).unwrap_or_default(),
+        "Layers":   [format!("{layer_dir}/layer.tar")]
+    }]);
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+
+    // Step 5 — assemble outer Docker image tar
     let out_file = std::fs::File::create(output_path)
         .with_context(|| format!("creating output tarball '{}'", output_path.display()))?;
+    let mut outer = tar::Builder::new(out_file);
 
-    let mut builder = Builder::new(out_file);
+    append_in_memory(&mut outer, "manifest.json", &manifest_bytes)?;
+    append_in_memory(&mut outer, &config_filename, &config_bytes)?;
+    append_in_memory(&mut outer, &format!("{layer_dir}/layer.tar"), &layer_bytes)?;
 
-    // Extract retained file content from the source tarball
+    outer.finish()?;
+    Ok(())
+}
+
+fn append_in_memory<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    path: &str,
+    data: &[u8],
+) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(data.len() as u64);
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_cksum();
+    builder.append_data(&mut header, path, Cursor::new(data))?;
+    Ok(())
+}
+
+fn build_layer_tar(image: &OciImage, result: &FilterResult) -> Result<Vec<u8>> {
+    // Build retained path set — normalise to forward-slash absolute paths
+    // because Windows PathBuf uses backslashes but tar entries use forward slashes.
     let retained_paths: BTreeSet<String> = result
         .retained
         .iter()
-        .map(|f| f.path.to_string_lossy().to_string())
+        .map(|f| {
+            let s = f.path.to_string_lossy().replace('\\', "/");
+            if s.starts_with('/') { s } else { format!("/{s}") }
+        })
         .collect();
 
-    // Re-stream retained files from the original raw tarball
-    let cursor = Cursor::new(&image.raw_tarball);
-    let mut outer = tar::Archive::new(cursor);
+    let mut layer_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut layer_bytes);
 
-    // We need to iterate layer.tar entries inside the outer archive
-    for outer_entry in outer.entries()? {
-        let mut outer_entry = outer_entry?;
-        let outer_path = outer_entry.path()?.to_string_lossy().into_owned();
+        let cursor = Cursor::new(&image.raw_tarball);
+        let mut outer = tar::Archive::new(cursor);
 
-        if !outer_path.ends_with("layer.tar") {
-            continue;
-        }
+        // Supports both classic (*/layer.tar) and OCI (blobs/sha256/*) layouts
+        for outer_entry in outer.entries()? {
+            let mut outer_entry = outer_entry?;
+            let raw_outer = outer_entry.path()?.to_string_lossy().into_owned();
+            let outer_path = raw_outer.trim_start_matches("./").replace('\\', "/");
 
-        let mut layer_bytes = Vec::new();
-        outer_entry.read_to_end(&mut layer_bytes)?;
+            let is_layer = outer_path.ends_with("layer.tar")
+                || outer_path.starts_with("blobs/sha256/");
+            if !is_layer {
+                continue;
+            }
 
-        let inner_cursor: Box<dyn std::io::Read> =
-            if layer_bytes.len() >= 2 && layer_bytes[0] == 0x1f && layer_bytes[1] == 0x8b {
-                Box::new(flate2::read::GzDecoder::new(Cursor::new(layer_bytes)))
-            } else {
-                Box::new(Cursor::new(layer_bytes))
+            let mut blob = Vec::new();
+            outer_entry.read_to_end(&mut blob)?;
+
+            let inner_reader: Box<dyn std::io::Read> =
+                if blob.len() >= 2 && blob[0] == 0x1f && blob[1] == 0x8b {
+                    Box::new(flate2::read::GzDecoder::new(Cursor::new(blob)))
+                } else {
+                    Box::new(Cursor::new(blob))
+                };
+
+            let mut inner_archive = tar::Archive::new(inner_reader);
+            let entries_iter = match inner_archive.entries() {
+                Ok(it) => it,
+                Err(_) => continue, // skip config blob (not a tar)
             };
 
-        let mut inner_archive = tar::Archive::new(inner_cursor);
+            for entry in entries_iter {
+                let mut entry = match entry { Ok(e) => e, Err(_) => continue };
+                let raw_str = entry.path()?.to_string_lossy().into_owned();
+                let stripped = raw_str.trim_start_matches("./").replace('\\', "/");
+                let key = if stripped.starts_with('/') {
+                    stripped
+                } else {
+                    format!("/{stripped}")
+                };
 
-        for inner_entry in inner_archive.entries()? {
-            let mut inner_entry = inner_entry?;
-            let raw_path = inner_entry.path()?.to_path_buf();
-            let norm = if raw_path.starts_with(".") {
-                PathBuf::from("/").join(raw_path.strip_prefix(".").unwrap())
-            } else {
-                raw_path
-            };
-
-            let key = norm.to_string_lossy().to_string();
-            if retained_paths.contains(&key) {
-                let mut content = Vec::new();
-                inner_entry.read_to_end(&mut content)?;
-
-                let mut header = inner_entry.header().clone();
-                builder.append_data(&mut header, &norm, Cursor::new(&content))?;
+                if retained_paths.contains(&key) {
+                    let mut content = Vec::new();
+                    entry.read_to_end(&mut content)?;
+                    let mut header = entry.header().clone();
+                    let rel = key.trim_start_matches('/');
+                    builder.append_data(&mut header, rel, Cursor::new(&content))?;
+                }
             }
         }
+
+        builder.finish()?;
     }
 
-    builder.finish()?;
-    Ok(())
+    Ok(layer_bytes)
 }
 
