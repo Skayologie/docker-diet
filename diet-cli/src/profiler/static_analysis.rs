@@ -160,8 +160,15 @@ fn collect_roots(image: &OciImage) -> Vec<PathBuf> {
         let p = PathBuf::from(candidate);
         if p.is_absolute() {
             roots.push(p);
+        } else if !candidate.contains('/') && !candidate.contains('\\') {
+            // Bare command name (e.g. "node", "python3") — search standard PATH dirs
+            for dir in &["/usr/local/bin", "/usr/bin", "/bin", "/sbin", "/usr/sbin"] {
+                roots.push(PathBuf::from(format!("{}/{}", dir, candidate)));
+            }
         } else if !cfg.working_dir.is_empty() {
-            roots.push(PathBuf::from(&cfg.working_dir).join(&p));
+            // Relative path — join with working directory using forward slashes
+            let wd = cfg.working_dir.trim_end_matches('/');
+            roots.push(PathBuf::from(format!("{}/{}", wd, candidate)));
         }
     }
 

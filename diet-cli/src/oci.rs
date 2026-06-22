@@ -127,7 +127,9 @@ fn parse_docker_save(data: Vec<u8>) -> Result<OciImage> {
         let mut archive = Archive::new(cursor);
         for entry in archive.entries()? {
             let mut entry = entry?;
-            let path_str = entry.path()?.to_string_lossy().into_owned();
+            let raw = entry.path()?.to_string_lossy().into_owned();
+            // Strip leading "./" so lookups work for both classic and OCI layouts
+            let path_str = raw.trim_start_matches("./").replace('\\', "/");
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             entries.insert(path_str, buf);
@@ -354,10 +356,13 @@ pub fn extract_content_to_dir(image: &OciImage, dest_dir: &Path) -> Result<()> {
 
     for entry in outer.entries()? {
         let mut entry = entry?;
-        let path_str = entry.path()?.to_string_lossy().into_owned();
+        let raw = entry.path()?.to_string_lossy().into_owned();
+        let path_str = raw.trim_start_matches("./").replace('\\', "/");
 
-        // Only process layer.tar files
-        if !path_str.ends_with("layer.tar") {
+        // Support both classic format (<hash>/layer.tar) and OCI format (blobs/sha256/<hash>)
+        let is_layer = path_str.ends_with("layer.tar")
+            || path_str.starts_with("blobs/sha256/");
+        if !is_layer {
             continue;
         }
 
@@ -374,8 +379,15 @@ pub fn extract_content_to_dir(image: &OciImage, dest_dir: &Path) -> Result<()> {
         layer_archive.set_preserve_permissions(false);
         layer_archive.set_overwrite(true);
 
-        for entry in layer_archive.entries()? {
-            let mut entry = entry?;
+        // OCI blobs/sha256/ directory contains both layer tars and the config JSON —
+        // silently skip any entry that isn't a valid tar (e.g. the config blob).
+        let entries_iter = match layer_archive.entries() {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+
+        for entry in entries_iter {
+            let mut entry = match entry { Ok(e) => e, Err(_) => continue };
             let raw_path = entry.path()?.to_path_buf();
             let norm = normalise_path(&raw_path);
 
